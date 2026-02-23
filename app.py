@@ -6,9 +6,35 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_groq import ChatGroq
+from langchain_openai import ChatOpenAI
+from langchain_anthropic import ChatAnthropic
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage
 import tempfile
+
+PROVIDERS = {
+    "Groq (무료)": {
+        "models": ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"],
+        "placeholder": "gsk_...",
+        "url": "https://console.groq.com",
+    },
+    "OpenAI": {
+        "models": ["gpt-4o", "gpt-4o-mini", "gpt-3.5-turbo"],
+        "placeholder": "sk-...",
+        "url": "https://platform.openai.com/api-keys",
+    },
+    "Anthropic (Claude)": {
+        "models": ["claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", "claude-3-opus-20240229"],
+        "placeholder": "sk-ant-...",
+        "url": "https://console.anthropic.com",
+    },
+    "Google Gemini (무료)": {
+        "models": ["gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"],
+        "placeholder": "AIza...",
+        "url": "https://aistudio.google.com/apikey",
+    },
+}
 
 load_dotenv()
 
@@ -90,14 +116,22 @@ def get_api_key():
     return user_key if user_key else server_key
 
 
+def build_llm(provider, model, api_key):
+    if provider == "Groq (무료)":
+        return ChatGroq(model=model, temperature=0, api_key=api_key, streaming=True)
+    elif provider == "OpenAI":
+        return ChatOpenAI(model=model, temperature=0, api_key=api_key, streaming=True)
+    elif provider == "Anthropic (Claude)":
+        return ChatAnthropic(model=model, temperature=0, api_key=api_key, streaming=True)
+    elif provider == "Google Gemini (무료)":
+        return ChatGoogleGenerativeAI(model=model, temperature=0, google_api_key=api_key, streaming=True)
+
+
 def build_chain():
     api_key = get_api_key()
-    llm = ChatGroq(
-        model="llama-3.3-70b-versatile",
-        temperature=0,
-        api_key=api_key,
-        streaming=True
-    )
+    provider = st.session_state.get("selected_provider", "Groq (무료)")
+    model = st.session_state.get("selected_model", "llama-3.3-70b-versatile")
+    llm = build_llm(provider, model, api_key)
     prompt = ChatPromptTemplate.from_messages([
         ("system", """당신은 문서 분석 전문 AI 어시스턴트입니다.
 아래 문서 내용을 바탕으로 사용자의 질문에 정확하고 친절하게 한국어로 답변하세요.
@@ -145,18 +179,33 @@ def stream_response(chain, retriever, question, messages):
 with st.sidebar:
     st.header("⚙️ 설정")
 
-    # API 키 입력
-    with st.expander("🔑 Groq API 키 입력 (선택)", expanded=not bool(get_api_key())):
+    # AI 프로바이더 설정
+    with st.expander("🤖 AI 설정", expanded=not bool(get_api_key())):
+        provider = st.selectbox(
+            "AI 제공사 선택",
+            options=list(PROVIDERS.keys()),
+            index=list(PROVIDERS.keys()).index(st.session_state.get("selected_provider", "Groq (무료)"))
+        )
+        st.session_state.selected_provider = provider
+
+        model = st.selectbox(
+            "모델 선택",
+            options=PROVIDERS[provider]["models"],
+            index=0
+        )
+        st.session_state.selected_model = model
+
         api_key_input = st.text_input(
             "API 키",
             type="password",
-            placeholder="gsk_...",
+            placeholder=PROVIDERS[provider]["placeholder"],
             value=st.session_state.get("user_api_key", ""),
-            help="키가 없으면 https://console.groq.com 에서 무료 발급"
         )
+        st.caption(f"키 발급 → [{provider}]({PROVIDERS[provider]['url']})")
+
         if api_key_input:
             st.session_state.user_api_key = api_key_input.strip()
-            st.success("키 저장됨")
+            st.success("✅ 키 저장됨")
 
     st.divider()
     st.header("📁 문서 업로드")
@@ -230,7 +279,19 @@ else:
                     response_chunks.append(chunk)
                     yield chunk
 
-            st.write_stream(collect_and_stream())
-            full_response = "".join(response_chunks)
+            try:
+                st.write_stream(collect_and_stream())
+                full_response = "".join(response_chunks)
+            except Exception as e:
+                err = str(e)
+                if "429" in err or "RESOURCE_EXHAUSTED" in err or "quota" in err.lower():
+                    full_response = "⚠️ API 사용량 한도를 초과했습니다. 잠시 후 다시 시도하거나 다른 AI 제공사로 변경해주세요."
+                elif "401" in err or "invalid" in err.lower() or "authentication" in err.lower():
+                    full_response = "⚠️ API 키가 올바르지 않습니다. 사이드바에서 키를 확인해주세요."
+                elif "404" in err or "model" in err.lower():
+                    full_response = "⚠️ 선택한 모델을 찾을 수 없습니다. 다른 모델을 선택해주세요."
+                else:
+                    full_response = f"⚠️ 오류가 발생했습니다: {err[:200]}"
+                st.warning(full_response)
 
         st.session_state.messages.append({"role": "assistant", "content": full_response})
